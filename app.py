@@ -1,3 +1,6 @@
+from agents import call_agent
+from google.cloud import speech_v1p1beta1 as speech
+from dotenv import load_dotenv
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -6,9 +9,6 @@ from PyQt5.QtWidgets import (
     QTextEdit,
 )
 from PyQt5.QtCore import QSize
-from agents import call_agent
-from google.cloud import speech_v1p1beta1 as speech
-from dotenv import load_dotenv
 import sys
 import os
 import speech_recognition as sr
