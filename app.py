@@ -1,81 +1,115 @@
-from langchain.chat_models import ChatOpenAI
-from langchain.agents import initialize_agent, Tool, AgentType
-from tools import ArbitrumTransactionTool, UniswapV3SwapTool, ContractAddressTool
+from PyQt5.QtWidgets import (
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QPushButton,
+    QTextEdit,
+)
+from PyQt5.QtCore import QSize
+from agents import call_agent
+from google.cloud import speech_v1p1beta1 as speech
 from dotenv import load_dotenv
+import sys
 import os
-import json
+import speech_recognition as sr
+import io
 
 load_dotenv()
 
-openai_api_key = os.environ["OPENAI_API_KEY"]
-private_keys = os.environ["PRIVATE_KEYS"]
-arbitrum_rpc_url = os.environ["ARBITRUM_TESTNET_RPC_URL"]
-arbitrum_chain_id = os.environ["ARBITRUM_TESTNET_CHAIN_ID"]
-arbitrum_chain_id_int = int(arbitrum_chain_id)
-goerli_rpc_url = os.environ["GOERLI_RPC_URL"]
-
-arbitrum_tool = ArbitrumTransactionTool()
-uniswap_tool = UniswapV3SwapTool()
-contract_address_tool = ContractAddressTool()
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google-credentials.json"
 
 
-def run_arbitrum_tool(to: str, value: float):
-    return arbitrum_tool._run(
-        to, value, private_keys, arbitrum_rpc_url, arbitrum_chain_id_int
-    )
+class VoiceControlledChatbot(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumSize(QSize(500, 500))
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle("Blockchain Agent")
+        self.setStyleSheet(
+            """
+			QWidget {
+				background-color: #FFF;
+				color: #000;
+			}
+			"""
+        )
+
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.chatbox = QTextEdit()
+        self.chatbox.setReadOnly(True)
+        self.chatbox.setStyleSheet(
+            """
+			QTextEdit {
+				background-color: #FFF;
+				border: 1px solid #CCC;
+				border-radius: 10px;
+				font-size: 16px;
+				padding: 15px;
+				color: #000;
+			}
+			"""
+        )
+        self.layout.addWidget(self.chatbox)
+
+        self.speakButton = QPushButton("Speak")
+        self.speakButton.clicked.connect(self.listen)
+        self.speakButton.setStyleSheet(
+            """
+			QPushButton {
+				background-color: #007BFF;
+				border: none;
+				font-size: 20px;
+				padding: 15px;
+				color: #FFF;
+				border-radius: 20px;
+			}
+			QPushButton:hover {
+				background-color: #0056b3;
+			}
+			"""
+        )
+        self.layout.addWidget(self.speakButton)
+
+    def transcribe_audio_with_word_hints(self, audio_file, hints):
+        client = speech.SpeechClient()
+
+        content = audio_file.read()
+
+        audio = speech.RecognitionAudio(content=content)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=44100,
+            language_code="en-US",
+            speech_contexts=[speech.SpeechContext(phrases=hints)],
+        )
+
+        response = client.recognize(config=config, audio=audio)
+
+        for result in response.results:
+            self.chatbox.append(f"You said: {result.alternatives[0].transcript}")
+            self.chatbox.append(
+                f"Bot said: {call_agent(result.alternatives[0].transcript)}"
+            )
+
+    def listen(self):
+        r = sr.Recognizer()
+        with sr.Microphone() as source:
+            print("Listening...")
+            audio = r.listen(source)
+            print("Finished listening")
+
+        audio_file = io.BytesIO(audio.get_wav_data())
+        self.transcribe_audio_with_word_hints(audio_file, ["WETH", "USDC"])
 
 
-def parsing_arbitrum_tool(string: str):
-    to, value = string.split(",")
-    return run_arbitrum_tool(to, float(value))
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
 
+    chatbot = VoiceControlledChatbot()
+    chatbot.show()
 
-def run_uniswap_tool(
-    token_in: str,
-    token_out: str,
-    amount_in: int,
-    slippage: float,
-):
-    return uniswap_tool._run(
-        token_in,
-        token_out,
-        amount_in,
-        slippage,
-        private_keys,
-        goerli_rpc_url,
-    )
-
-
-def parsing_uniswap_tool(string: str):
-    token_in, token_out, amount_in, slippage = string.split(",")
-    return run_uniswap_tool(token_in, token_out, int(amount_in), float(slippage))
-
-
-def run_contract_address_tool(token_name: str):
-    token_data = json.load(open("utilities/goerli/tokens.json"))
-    return contract_address_tool._run(token_name, token_data)
-
-
-tool = Tool(
-    name="ArbitrumTransaction",
-    func=parsing_arbitrum_tool,
-    description="Sends a transaction on the Arbitrum blockchain. The input to this tool should be a comma separated list of strings of length two, representing the to address and the value to send. For example '0x8e5e01dca1706f9df683c53a6fc9d4bb8d237153,0.0000001' if you want to send 0.0000001 ETH to 0x8e5e01dca1706f9df683c53a6fc9d4bb8d237153.",
-)
-tool2 = Tool(
-    name="UniswapV3Swap",
-    func=parsing_uniswap_tool,
-    description="Execute a blockchain swap between two tokens. The input to this tool should be a comma separated list of strings of length four, representing the address of the token in input, the address of the token in output, the amount of token in input and the slippage. For example '0x8e5e01dca1706f9df683c53a6fc9d4bb8d237153,0x8e5e01dca1706f9df683c53a6fc9d4bb8d237153,1000000000000000000,0.01' if you want to swap 1 token in input with 1% of slippage.",
-)
-tool3 = Tool(
-    name="ContractAddress",
-    func=run_contract_address_tool,
-    description="Get the address of a token. The input to this tool should be a string representing the name of the token. For example 'USDC' if you want to get the address of the USDC token.",
-)
-
-llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo-0613", client=None)
-
-agent = initialize_agent(
-    [tool, tool2, tool3], llm, agent=AgentType.OPENAI_FUNCTIONS, verbose=True
-)
-
-agent.run("Swap 0.000001 WETH for 0.000001 USDC with 10% of slippage.")
+    sys.exit(app.exec_())

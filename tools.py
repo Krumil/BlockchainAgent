@@ -5,15 +5,27 @@ from typing import Type, List, Dict
 from hexbytes import HexBytes
 from dotenv import load_dotenv
 from time import time
+from functions import (
+    approve_token_transfer,
+    check_allowance,
+    check_balance,
+    execute_swap,
+)
 import os
 import json
 
 load_dotenv()
 
-uniswap_v3_router_address = os.environ["UNISWAP_ADDRESS_ON_GOERLI"]
+arbitrum_rpc_url = os.environ["ARBITRUM_TESTNET_RPC_URL"]
+arbitrum_chain_id = int(os.environ["ARBITRUM_TESTNET_CHAIN_ID"])
+goerli_rpc_url = os.environ["GOERLI_RPC_URL"]
+private_keys = os.environ["PRIVATE_KEYS"]
+uniswap_v3_router_address = Web3.to_checksum_address(
+    os.environ["UNISWAP_ADDRESS_ON_GOERLI"]
+)
 
-with open("contracts/uniswap/goerli.json") as f:
-    contract_abi = json.load(f)
+account = Account.from_key(private_keys)
+wallet_address = Web3.to_checksum_address(account.address)
 
 
 class TransactionInput(BaseModel):
@@ -26,11 +38,8 @@ class ArbitrumTransactionTool(BaseTool):
     description = "Sends a transaction on the Arbitrum blockchain"
     args_schema: Type[BaseModel] = TransactionInput
 
-    def _run(
-        self, to: str, value: float, private_keys: str, rpc_url: str, chain_id: int
-    ) -> str:
-        web3 = Web3(Web3.HTTPProvider(rpc_url))
-        account = Account.from_key(private_keys)
+    def _run(self, to: str, value: float) -> str:
+        web3 = Web3(Web3.HTTPProvider(arbitrum_rpc_url))
 
         transaction = {
             "from": account.address,
@@ -39,7 +48,7 @@ class ArbitrumTransactionTool(BaseTool):
             "gas": 21000,
             "gasPrice": web3.eth.gas_price,
             "nonce": web3.eth.get_transaction_count(account.address),
-            "chainId": chain_id,
+            "chainId": arbitrum_chain_id,
         }
 
         signed_txn = account.sign_transaction(transaction)
@@ -70,55 +79,40 @@ class UniswapV3SwapTool(BaseTool):
         token_out: str,
         amount_to_sell: int,
         slippage: float,
-        private_keys: str,
-        rpc_url: str,
     ) -> str:
-        web3 = Web3(Web3.HTTPProvider(rpc_url))
-        account = Account.from_key(private_keys)
-        wallet_address = Web3.to_checksum_address(account.address)
-        current_gas_price = web3.eth.gas_price
-        fee = 3000
-        gas_limit = 2000000
-        gas_max_priority = 10
-        uniswap = web3.eth.contract(
-            address=Web3.to_checksum_address(uniswap_v3_router_address),
-            abi=contract_abi,
-        )
-        minimum_amount = calculate_minimum_amount(
-            wallet_address,
-            uniswap,
+        web3 = Web3(Web3.HTTPProvider(goerli_rpc_url))
+
+        if check_balance(token_in, private_keys, amount_to_sell, web3) == False:
+            return "Insufficient balance"
+
+        have_allowance = check_allowance(
+            token_in,
+            uniswap_v3_router_address,
+            private_keys,
             amount_to_sell,
-            Web3.to_checksum_address(token_in),
-            Web3.to_checksum_address(token_out),
+            web3,
+        )
+
+        if have_allowance == False:
+            txn = approve_token_transfer(
+                token_in,
+                uniswap_v3_router_address,
+                amount_to_sell,
+                private_keys,
+                web3,
+            )
+            web3.eth.wait_for_transaction_receipt(txn, timeout=900)
+
+        swap_response = execute_swap(
+            token_in,
+            token_out,
+            amount_to_sell,
             slippage,
+            uniswap_v3_router_address,
+            private_keys,
+            web3,
         )
-
-        # Build the transaction.
-        txn_params = (
-            Web3.to_checksum_address(token_in),
-            Web3.to_checksum_address(token_out),
-            fee,
-            wallet_address,
-            amount_to_sell,
-            minimum_amount,
-            0,
-        )
-        txn = uniswap.functions.exactInputSingle(txn_params).build_transaction(
-            {
-                "from": wallet_address,
-                "gas": int(gas_limit),
-                "maxFeePerGas": current_gas_price,
-                "maxPriorityFeePerGas": web3.to_wei(2 * gas_max_priority, "gwei"),
-                "nonce": web3.eth.get_transaction_count(wallet_address),
-            }
-        )
-
-        signed_txn = web3.eth.account.sign_transaction(txn, private_keys)
-        txn_hash = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-        print(f"Transaction sent with hash: {txn_hash.hex()}")
-        txn_receipt = web3.eth.wait_for_transaction_receipt(txn_hash, timeout=900)
-        print(f'Transaction was mined in block: {txn_receipt["blockNumber"]}')
-        return str(txn_hash.hex())
+        return swap_response
 
     async def _arun(
         self,
@@ -157,8 +151,6 @@ def calculate_minimum_amount(
     token2_address: str,
     slippage: float,
 ) -> float:
-    amount_in = Web3.to_wei(amount_in, "ether")
-
     params = {
         "tokenIn": token1_address,
         "tokenOut": token2_address,
